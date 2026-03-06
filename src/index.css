@@ -1,0 +1,34 @@
+@import "tailwindcss";
+
+@theme {
+  --color-amber-500: #f59e0b;
+  --color-amber-600: #d97706;
+  --color-beer-foam: #ffffff;
+  --color-beer-liquid: #fbbf24;
+}
+
+@layer base {
+  body {
+    @apply bg-zinc-950 text-zinc-100 antialiased overflow-x-hidden;
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+}
+
+.beer-gradient {
+  background: linear-gradient(to bottom, var(--color-beer-foam) 0%, var(--color-beer-liquid) 15%, #d97706 100%);
+}
+
+@keyframes bubble {
+  0% { transform: translateY(0) scale(1); opacity: 0; }
+  50% { opacity: 0.8; }
+  100% { transform: translateY(-100vh) scale(1.5); opacity: 0; }
+}
+
+.bubble {
+  position: absolute;
+  bottom: -20px;
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 50%;
+  pointer-events: none;
+  animation: bubble linear infinite;
+}

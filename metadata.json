@@ -1,0 +1,5 @@
+{
+  "name": "AlcoTracker & BAC",
+  "description": "Sledujte svoju konzumáciu alkoholu, počítajte hladinu alkoholu v krvi (BAC) a zistite, kedy budete opäť triezvy.",
+  "requestFramePermissions": []
+}
