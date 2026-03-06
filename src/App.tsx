@@ -6,6 +6,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Beer, History, Plus, RotateCcw, Trash2, Trophy, Clock, Info, ChevronRight, X, User, GlassWater, Wine, Martini, Settings, BarChart3, TrendingUp, Calendar } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { BeerEntry, Session, UserProfile, DrinkType } from './types';
 
 const STORAGE_KEY = 'beer_tracker_sessions';
@@ -20,6 +21,7 @@ const DRINK_TYPES: DrinkType[] = [
   { id: 'wine-red', name: 'Červené víno', volume: 0.2, abv: 13.0, icon: 'wine' },
   { id: 'shot-40', name: 'Tvrdé (40%)', volume: 0.04, abv: 40.0, icon: 'martini' },
   { id: 'shot-52', name: 'Tvrdé (52%)', volume: 0.04, abv: 52.0, icon: 'martini' },
+  { id: 'aperol', name: 'Aperol Spritz', volume: 0.25, abv: 9.0, icon: 'wine' },
 ];
 
 export default function App() {
@@ -79,14 +81,24 @@ export default function App() {
     localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
   }, [profile]);
 
-  const calculateBAC = (session: Session, user: UserProfile, atTime: number = Date.now()) => {
-    if (!session.beers.length) return 0;
+  // Update pendingStartTime periodically if no session is active
+  useEffect(() => {
+    if (!currentSession) {
+      const interval = setInterval(() => {
+        setPendingStartTime(new Date().toISOString().slice(0, 16));
+      }, 60000);
+      return () => clearInterval(interval);
+    }
+  }, [currentSession]);
+
+  const calculateBAC = (drinks: BeerEntry[], user: UserProfile, atTime: number = Date.now()) => {
+    if (!drinks.length) return 0;
 
     const r = user.gender === 'male' ? 0.68 : 0.55;
     const beta = 0.15; // Elimination rate per hour (permille)
     
-    // Sort drinks by time just in case
-    const sortedDrinks = [...session.beers].sort((a, b) => a.timestamp - b.timestamp);
+    // Sort drinks by time
+    const sortedDrinks = [...drinks].sort((a, b) => a.timestamp - b.timestamp);
     
     let currentBAC = 0;
     let lastEventTime = sortedDrinks[0].timestamp;
@@ -99,7 +111,6 @@ export default function App() {
       currentBAC = Math.max(0, currentBAC - (beta * hoursPassed));
 
       // 2. Add the new drink's contribution
-      // Alcohol density is ~0.789 g/ml
       const grams = drink.volume * 1000 * (drink.abv / 100) * 0.789;
       const drinkContribution = grams / (user.weight * r);
       currentBAC += drinkContribution;
@@ -114,8 +125,8 @@ export default function App() {
     return Math.max(0, currentBAC);
   };
 
-  const getSoberTime = (session: Session, user: UserProfile) => {
-    const currentBAC = calculateBAC(session, user);
+  const getSoberTime = (drinks: BeerEntry[], user: UserProfile) => {
+    const currentBAC = calculateBAC(drinks, user);
     if (currentBAC <= 0) return null;
 
     const beta = 0.15;
@@ -334,14 +345,14 @@ export default function App() {
     });
   };
 
-  const currentBAC = useMemo(() => 
-    currentSession ? calculateBAC(currentSession, profile) : 0, 
-    [currentSession, profile, sessions]
-  );
+  const currentBAC = useMemo(() => {
+    const allBeers = sessions.flatMap(s => s.beers);
+    return calculateBAC(allBeers, profile);
+  }, [sessions, profile]);
 
   const soberTimeInfo = useMemo(() => {
-    if (!currentSession) return null;
-    const time = getSoberTime(currentSession, profile);
+    const allBeers = sessions.flatMap(s => s.beers);
+    const time = getSoberTime(allBeers, profile);
     if (!time) return null;
     
     const diffMs = time.getTime() - Date.now();
@@ -351,29 +362,61 @@ export default function App() {
     
     return {
       time,
-      hours,
-      minutes,
       formattedDuration: hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`
     };
-  }, [currentSession, profile, sessions]);
+  }, [sessions, profile]);
+
+  const residualBACAtSessionStart = useMemo(() => {
+    if (!currentSession) return 0;
+    const previousDrinks = sessions
+      .flatMap(s => s.beers)
+      .filter(b => b.timestamp < currentSession.startTime);
+    return calculateBAC(previousDrinks, profile, currentSession.startTime);
+  }, [currentSession, sessions, profile]);
 
   const globalStats = useMemo(() => {
     if (sessions.length === 0) return null;
     let totalBeers = 0;
     let totalAlcoholGrams = 0;
+    let workingDrinksCount = 0;
+    
+    // For trendline
+    const workingDrinksByDate: Record<string, number> = {};
     
     sessions.forEach(s => {
       totalBeers += s.beers.length;
       s.beers.forEach(b => {
         totalAlcoholGrams += (b.volume * 1000 * (b.abv / 100) * 0.789);
+        
+        // Working drink check: Mon-Fri (1-5), 8:00 - 17:00
+        const date = new Date(b.timestamp);
+        const day = date.getDay(); // 0 is Sunday, 1-5 is Mon-Fri
+        const hour = date.getHours();
+        
+        if (day >= 1 && day <= 5 && hour >= 8 && hour < 17) {
+          workingDrinksCount++;
+          const dateKey = date.toLocaleDateString('sk-SK');
+          workingDrinksByDate[dateKey] = (workingDrinksByDate[dateKey] || 0) + 1;
+        }
       });
     });
+
+    // Convert to array for recharts
+    const trendData = Object.entries(workingDrinksByDate)
+      .map(([date, count]) => ({ date, count }))
+      .sort((a, b) => {
+        const [da, ma, ya] = a.date.split('.').map(Number);
+        const [db, mb, yb] = b.date.split('.').map(Number);
+        return new Date(ya, ma - 1, da).getTime() - new Date(yb, mb - 1, db).getTime();
+      });
 
     return {
       avgBeers: (totalBeers / sessions.length).toFixed(1),
       totalSessions: sessions.length,
       totalBeers,
       totalAlcoholGrams: totalAlcoholGrams.toFixed(1),
+      workingDrinksCount,
+      trendData,
     };
   }, [sessions]);
 
@@ -384,11 +427,24 @@ export default function App() {
 
   const selectedSessionStats = useMemo(() => {
     if (!selectedSession) return null;
-    const bac = calculateBAC(selectedSession, profile, selectedSession.endTime || Date.now());
-    const soberAt = getSoberTime(selectedSession, profile);
+    
+    // To calculate BAC for a specific session accurately, we must include all drinks up to that point
+    const allDrinksUpToSessionEnd = sessions
+      .flatMap(s => s.beers)
+      .filter(b => b.timestamp <= (selectedSession.endTime || Date.now()));
+      
+    const bac = calculateBAC(allDrinksUpToSessionEnd, profile, selectedSession.endTime || Date.now());
+    const soberAt = getSoberTime(allDrinksUpToSessionEnd, profile);
+    
+    // Calculate residual BAC at the START of this session
+    const drinksBeforeSession = sessions
+      .flatMap(s => s.beers)
+      .filter(b => b.timestamp < selectedSession.startTime);
+    const residualAtStart = calculateBAC(drinksBeforeSession, profile, selectedSession.startTime);
+
     let durationFormatted = 'N/A';
     if (soberAt) {
-      const diffMs = soberAt.getTime() - Date.now();
+      const diffMs = soberAt.getTime() - (selectedSession.endTime || Date.now());
       const totalMinutes = Math.max(0, Math.floor(diffMs / 60000));
       const h = Math.floor(totalMinutes / 60);
       const m = totalMinutes % 60;
@@ -397,11 +453,12 @@ export default function App() {
 
     return {
       bac: bac.toFixed(2),
+      residualAtStart: residualAtStart.toFixed(2),
       soberAt,
       durationFormatted,
       totalAlcohol: selectedSession.beers.reduce((acc, b) => acc + (b.volume * 1000 * (b.abv / 100) * 0.789), 0).toFixed(1),
     };
-  }, [selectedSession, profile]);
+  }, [sessions, selectedSession, profile]);
 
   return (
     <div className="relative min-h-screen flex flex-col items-center justify-between p-6 pb-12 overflow-hidden">
@@ -436,11 +493,12 @@ export default function App() {
       {/* Main Counter */}
       <main className="flex-1 flex flex-col items-center justify-center w-full max-w-md z-10 py-8">
         <AnimatePresence mode="wait">
-          {!currentSession ? (
+          {!currentSession && currentBAC <= 0 ? (
             <motion.div key="no-session" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9 }} className="text-center w-full">
               <div className="mb-8 p-8 bg-zinc-900/30 border border-zinc-800 rounded-3xl backdrop-blur-sm">
-                <GlassWater className="mx-auto mb-4 text-amber-500" size={48} />
-                <h2 className="text-3xl font-bold mb-6">Nová jazda</h2>
+                <GlassWater className="mx-auto mb-4 text-emerald-500" size={48} />
+                <h2 className="text-3xl font-bold mb-6">Si triezvy</h2>
+                <p className="text-zinc-500 text-sm mb-8">Môžeš začať novú jazdu kedykoľvek.</p>
                 
                 <div className="mb-6 w-full text-left">
                   <label className="block text-zinc-500 text-[10px] uppercase tracking-widest mb-2 px-1">Kedy si začal piť?</label>
@@ -464,64 +522,119 @@ export default function App() {
           ) : (
             <motion.div key="active-session" initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="w-full flex flex-col items-center">
               <div className="relative mb-4 text-center">
-                <motion.div key={currentBAC} initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="text-[100px] font-black text-amber-500 leading-none drop-shadow-[0_0_30px_rgba(245,158,11,0.3)]">
+                <motion.div 
+                  key={currentBAC} 
+                  initial={{ scale: 0.8, opacity: 0 }} 
+                  animate={{ scale: 1, opacity: 1 }} 
+                  className={`text-[100px] font-black leading-none drop-shadow-[0_0_30px_rgba(245,158,11,0.3)] ${
+                    currentBAC < 0.5 ? 'text-emerald-500' : 
+                    currentBAC < 1.0 ? 'text-amber-500' : 
+                    currentBAC < 2.0 ? 'text-orange-500' : 'text-red-500'
+                  }`}
+                >
                   {currentBAC.toFixed(2)}
                 </motion.div>
                 <div className="text-zinc-500 font-medium uppercase tracking-widest text-sm">
-                  Aktuálne promile (‰)
+                  {currentBAC > 0 ? 'Aktuálne promile (‰)' : 'Si triezvy'}
+                </div>
+                
+                {/* Visual BAC Indicator Bar */}
+                <div className="mt-4 w-64 h-2 bg-zinc-900 rounded-full overflow-hidden mx-auto border border-zinc-800">
+                  <motion.div 
+                    initial={{ width: 0 }}
+                    animate={{ width: `${Math.min(100, (currentBAC / 3.0) * 100)}%` }}
+                    className={`h-full rounded-full ${
+                      currentBAC < 0.5 ? 'bg-emerald-500' : 
+                      currentBAC < 1.0 ? 'bg-amber-500' : 
+                      currentBAC < 2.0 ? 'bg-orange-500' : 'bg-red-500'
+                    }`}
+                  />
                 </div>
               </div>
 
               {soberTimeInfo && (
-                <div className="mb-8 px-4 py-2 bg-amber-500/10 border border-amber-500/20 rounded-full text-amber-500 text-sm font-bold flex flex-col items-center gap-1">
-                  <div className="flex items-center gap-2">
+                <div className="mb-8 flex flex-col items-center gap-2">
+                  <div className="px-4 py-2 bg-amber-500/10 border border-amber-500/20 rounded-full text-amber-500 text-sm font-bold flex items-center gap-2">
                     <Clock size={16} />
                     <span>Triezvy o: {soberTimeInfo.time.toLocaleTimeString('sk-SK', { hour: '2-digit', minute: '2-digit' })}</span>
+                    <span className="text-[10px] opacity-70 uppercase tracking-wider ml-1">({soberTimeInfo.formattedDuration})</span>
                   </div>
-                  <span className="text-[10px] opacity-70 uppercase tracking-wider">Za {soberTimeInfo.formattedDuration}</span>
+                  
+                  {residualBACAtSessionStart > 0 && currentSession && (
+                    <div className="text-[10px] text-orange-400 font-bold uppercase tracking-widest flex items-center gap-1">
+                      <RotateCcw size={10} />
+                      Zostatok z minula: {residualBACAtSessionStart.toFixed(2)} ‰
+                    </div>
+                  )}
                 </div>
               )}
 
-              {/* Drink Type Grid */}
-              <div className="grid grid-cols-2 gap-2 w-full mb-8 max-h-[200px] overflow-y-auto p-1">
-                {DRINK_TYPES.map(drink => (
-                  <button
-                    key={drink.id}
-                    onClick={() => setSelectedDrinkId(drink.id)}
-                    className={`p-3 rounded-xl border transition-all text-left flex items-center gap-3 ${
-                      selectedDrinkId === drink.id 
-                        ? 'bg-amber-500 border-amber-400 text-zinc-950 shadow-lg' 
-                        : 'bg-zinc-900/50 border-zinc-800 text-zinc-400 hover:border-zinc-700'
-                    }`}
-                  >
-                    {drink.icon === 'beer' && <Beer size={18} />}
-                    {drink.icon === 'wine' && <Wine size={18} />}
-                    {drink.icon === 'martini' && <Martini size={18} />}
-                    <div className="flex flex-col">
-                      <span className="text-xs font-bold leading-tight">{drink.name}</span>
-                      <span className="text-[10px] opacity-70">{drink.volume * 1000}ml • {drink.abv}%</span>
-                    </div>
-                  </button>
-                ))}
-                <button
-                  onClick={() => setShowCustomModal(true)}
-                  className="p-3 rounded-xl border border-dashed border-zinc-700 bg-zinc-900/30 text-zinc-500 hover:border-amber-500/50 hover:text-amber-500 transition-all text-left flex items-center gap-3"
-                >
-                  <Plus size={18} />
-                  <div className="flex flex-col">
-                    <span className="text-xs font-bold leading-tight">Vlastný...</span>
-                    <span className="text-[10px] opacity-70">Iný objem / %</span>
+              {currentSession ? (
+                <>
+                  {/* Drink Type Grid */}
+                  <div className="grid grid-cols-2 gap-2 w-full mb-8 max-h-[200px] overflow-y-auto p-1">
+                    {DRINK_TYPES.map(drink => (
+                      <button
+                        key={drink.id}
+                        onClick={() => setSelectedDrinkId(drink.id)}
+                        className={`p-3 rounded-xl border transition-all text-left flex items-center gap-3 ${
+                          selectedDrinkId === drink.id 
+                            ? 'bg-amber-500 border-amber-400 text-zinc-950 shadow-lg' 
+                            : 'bg-zinc-900/50 border-zinc-800 text-zinc-400 hover:border-zinc-700'
+                        }`}
+                      >
+                        {drink.icon === 'beer' && <Beer size={18} />}
+                        {drink.icon === 'wine' && <Wine size={18} />}
+                        {drink.icon === 'martini' && <Martini size={18} />}
+                        <div className="flex flex-col">
+                          <span className="text-xs font-bold leading-tight">{drink.name}</span>
+                          <span className="text-[10px] opacity-70">{drink.volume * 1000}ml • {drink.abv}%</span>
+                        </div>
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setShowCustomModal(true)}
+                      className="p-3 rounded-xl border border-dashed border-zinc-700 bg-zinc-900/30 text-zinc-500 hover:border-amber-500/50 hover:text-amber-500 transition-all text-left flex items-center gap-3"
+                    >
+                      <Plus size={18} />
+                      <div className="flex flex-col">
+                        <span className="text-xs font-bold leading-tight">Vlastný...</span>
+                        <span className="text-[10px] opacity-70">Iný objem / %</span>
+                      </div>
+                    </button>
                   </div>
-                </button>
-              </div>
 
-              <button
-                onClick={addDrink}
-                className="w-full py-6 bg-amber-500 rounded-2xl flex flex-col items-center justify-center shadow-2xl shadow-amber-500/40 active:scale-95 transition-all border-b-4 border-amber-600"
-              >
-                <Plus size={32} className="text-zinc-950" />
-                <span className="text-zinc-950 font-black text-xl">PRIDAŤ DRINK</span>
-              </button>
+                  <button
+                    onClick={addDrink}
+                    className="w-full py-6 bg-amber-500 rounded-2xl flex flex-col items-center justify-center shadow-2xl shadow-amber-500/40 active:scale-95 transition-all border-b-4 border-amber-600"
+                  >
+                    <Plus size={32} className="text-zinc-950" />
+                    <span className="text-zinc-950 font-black text-xl">PRIDAŤ DRINK</span>
+                  </button>
+                </>
+              ) : (
+                <div className="w-full mt-4">
+                  <div className="p-6 bg-zinc-900/50 border border-zinc-800 rounded-3xl backdrop-blur-sm">
+                    <h3 className="text-lg font-bold mb-4 text-center text-amber-500">Máš zostatkový alkohol</h3>
+                    <div className="mb-6 w-full text-left">
+                      <label className="block text-zinc-500 text-[10px] uppercase tracking-widest mb-2 px-1">Kedy si začal znova piť?</label>
+                      <input 
+                        type="datetime-local" 
+                        value={pendingStartTime}
+                        onChange={(e) => setPendingStartTime(e.target.value)}
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-2xl p-4 text-zinc-100 focus:outline-none focus:border-amber-500 transition-colors text-sm"
+                      />
+                    </div>
+                    <button 
+                      onClick={() => startNewSession(new Date(pendingStartTime).getTime())} 
+                      className="w-full py-4 bg-amber-500 text-zinc-950 font-bold rounded-2xl shadow-xl shadow-amber-500/20 active:scale-95 transition-all flex items-center justify-center gap-2"
+                    >
+                      <Plus size={24} />
+                      Začať novú jazdu
+                    </button>
+                  </div>
+                </div>
+              )}
             </motion.div>
           )}
         </AnimatePresence>
@@ -580,12 +693,60 @@ export default function App() {
                       <div className="text-2xl font-bold">{globalStats.avgBeers}</div>
                     </div>
                     <div className="p-5 bg-zinc-900 border border-zinc-800 rounded-3xl">
+                      <div className="text-zinc-500 text-[10px] uppercase tracking-widest mb-2">Pracovné drinky</div>
+                      <div className={`text-2xl font-bold ${globalStats.workingDrinksCount > 0 ? 'text-red-400' : 'text-zinc-100'}`}>
+                        {globalStats.workingDrinksCount}
+                      </div>
+                    </div>
+                    <div className="p-5 bg-zinc-900 border border-zinc-800 rounded-3xl">
                       <div className="text-zinc-500 text-[10px] uppercase tracking-widest mb-2">Stav</div>
                       <div className="text-sm font-bold text-emerald-500 flex items-center gap-1">
                         <TrendingUp size={14} /> Aktívny
                       </div>
                     </div>
                   </div>
+
+                  {globalStats.trendData.length > 0 && (
+                    <div className="p-6 bg-zinc-900 border border-zinc-800 rounded-3xl">
+                      <h4 className="text-sm font-bold text-zinc-100 mb-4 flex items-center gap-2">
+                        <TrendingUp size={16} className="text-red-400" /> Trend pitia v práci
+                      </h4>
+                      <div className="h-48 w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart data={globalStats.trendData}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                            <XAxis 
+                              dataKey="date" 
+                              stroke="#71717a" 
+                              fontSize={10} 
+                              tickLine={false} 
+                              axisLine={false}
+                              tickFormatter={(val) => val.split('.')[0] + '.' + val.split('.')[1]}
+                            />
+                            <YAxis 
+                              stroke="#71717a" 
+                              fontSize={10} 
+                              tickLine={false} 
+                              axisLine={false}
+                              allowDecimals={false}
+                            />
+                            <Tooltip 
+                              contentStyle={{ backgroundColor: '#18181b', border: '1px solid #27272a', borderRadius: '12px' }}
+                              itemStyle={{ color: '#f87171', fontWeight: 'bold' }}
+                            />
+                            <Line 
+                              type="monotone" 
+                              dataKey="count" 
+                              stroke="#f87171" 
+                              strokeWidth={3} 
+                              dot={{ r: 4, fill: '#f87171', strokeWidth: 0 }}
+                              activeDot={{ r: 6, strokeWidth: 0 }}
+                            />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="p-6 bg-amber-500/5 border border-amber-500/10 rounded-3xl">
                     <h4 className="text-sm font-bold text-amber-500 mb-2 flex items-center gap-2">
@@ -801,6 +962,12 @@ export default function App() {
                       <div className="text-xl font-bold text-amber-500">{selectedSessionStats?.bac} ‰</div>
                     </div>
                     <div className="p-4 bg-zinc-900 border border-zinc-800 rounded-2xl">
+                      <div className="text-zinc-500 text-[10px] uppercase mb-1">Zostatok na štarte</div>
+                      <div className={`text-xl font-bold ${Number(selectedSessionStats?.residualAtStart) > 0 ? 'text-orange-400' : 'text-zinc-400'}`}>
+                        {selectedSessionStats?.residualAtStart} ‰
+                      </div>
+                    </div>
+                    <div className="p-4 bg-zinc-900 border border-zinc-800 rounded-2xl">
                       <div className="text-zinc-500 text-[10px] uppercase mb-1">Triezvy o / za</div>
                       <div className="text-lg font-bold leading-tight">
                         {selectedSessionStats?.soberAt?.toLocaleTimeString('sk-SK', { hour: '2-digit', minute: '2-digit' }) || 'N/A'}
@@ -810,10 +977,6 @@ export default function App() {
                     <div className="p-4 bg-zinc-900 border border-zinc-800 rounded-2xl">
                       <div className="text-zinc-500 text-[10px] uppercase mb-1">Čistý alkohol</div>
                       <div className="text-lg font-bold">{selectedSessionStats?.totalAlcohol} g</div>
-                    </div>
-                    <div className="p-4 bg-zinc-900 border border-zinc-800 rounded-2xl">
-                      <div className="text-zinc-500 text-[10px] uppercase mb-1">Drinkov</div>
-                      <div className="text-lg font-bold">{selectedSession.beers.length}</div>
                     </div>
                   </div>
                   <section>
