@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Beer, History, Plus, RotateCcw, Trash2, Trophy, Clock, Info, ChevronRight, X, User, GlassWater, Wine, Martini, Settings } from 'lucide-react';
+import { Beer, History, Plus, RotateCcw, Trash2, Trophy, Clock, Info, ChevronRight, X, User, GlassWater, Wine, Martini, Settings, BarChart3, TrendingUp, Calendar } from 'lucide-react';
 import { BeerEntry, Session, UserProfile, DrinkType } from './types';
 
 const STORAGE_KEY = 'beer_tracker_sessions';
@@ -27,9 +27,12 @@ export default function App() {
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
+  const [showStats, setShowStats] = useState(false);
   const [showCustomModal, setShowCustomModal] = useState(false);
+  const [pendingStartTime, setPendingStartTime] = useState(new Date().toISOString().slice(0, 16));
   const [customDrink, setCustomDrink] = useState({ category: 'beer', volume: 500, abv: 5.0 });
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [customDrinkSessionId, setCustomDrinkSessionId] = useState<string | null>(null);
   const [selectedDrinkId, setSelectedDrinkId] = useState<string>(DRINK_TYPES[0].id);
   const [profile, setProfile] = useState<UserProfile>({ weight: 80, gender: 'male', age: 30 });
   const [bubbles, setBubbles] = useState<{ id: number; left: string; size: string; duration: string; delay: string }[]>([]);
@@ -82,28 +85,31 @@ export default function App() {
     const r = user.gender === 'male' ? 0.68 : 0.55;
     const beta = 0.15; // Elimination rate per hour (permille)
     
-    let totalAlcoholGrams = 0;
-    session.beers.forEach(drink => {
-      if (drink.timestamp <= atTime) {
-        // Alcohol density is ~0.789 g/ml
-        // Volume is in liters, so volume * 1000 * (abv/100) * 0.789
-        const grams = drink.volume * 1000 * (drink.abv / 100) * 0.789;
-        totalAlcoholGrams += grams;
-      }
+    // Sort drinks by time just in case
+    const sortedDrinks = [...session.beers].sort((a, b) => a.timestamp - b.timestamp);
+    
+    let currentBAC = 0;
+    let lastEventTime = sortedDrinks[0].timestamp;
+
+    sortedDrinks.forEach(drink => {
+      if (drink.timestamp > atTime) return;
+
+      // 1. Calculate elimination since the last drink
+      const hoursPassed = (drink.timestamp - lastEventTime) / 3600000;
+      currentBAC = Math.max(0, currentBAC - (beta * hoursPassed));
+
+      // 2. Add the new drink's contribution
+      // Alcohol density is ~0.789 g/ml
+      const grams = drink.volume * 1000 * (drink.abv / 100) * 0.789;
+      const drinkContribution = grams / (user.weight * r);
+      currentBAC += drinkContribution;
+
+      lastEventTime = drink.timestamp;
     });
 
-    const firstDrinkTime = session.beers[0].timestamp;
-    const hoursSinceStart = (atTime - firstDrinkTime) / 3600000;
-    
-    // Widmark formula: BAC = (A / (W * r)) - (B * t)
-    // A: total alcohol in grams
-    // W: body weight in kg
-    // r: Widmark factor
-    // B: elimination rate (0.15 per hour)
-    // t: time since start in hours
-    
-    const initialBAC = totalAlcoholGrams / (user.weight * r);
-    const currentBAC = initialBAC - (beta * hoursSinceStart);
+    // 3. Final elimination from the last drink until atTime
+    const finalHours = (atTime - lastEventTime) / 3600000;
+    currentBAC = Math.max(0, currentBAC - (beta * finalHours));
     
     return Math.max(0, currentBAC);
   };
@@ -117,10 +123,10 @@ export default function App() {
     return new Date(Date.now() + hoursToSober * 3600000);
   };
 
-  const startNewSession = () => {
+  const startNewSession = (startTime: number = Date.now()) => {
     const newSession: Session = {
       id: Date.now().toString(),
-      startTime: Date.now(),
+      startTime: startTime,
       beers: [],
     };
     setSessions(prev => [newSession, ...prev]);
@@ -152,32 +158,41 @@ export default function App() {
   };
 
   const addCustomDrink = () => {
-    if (!currentSession) {
-      startNewSession();
-      return;
-    }
-
     const categoryNames: Record<string, string> = {
       beer: 'Vlastné pivo',
       wine: 'Vlastné víno',
       martini: 'Vlastný drink'
     };
 
-    const newDrink: BeerEntry = {
-      id: Date.now().toString(),
-      timestamp: Date.now(),
+    const drinkData = {
       type: `${categoryNames[customDrink.category] || 'Vlastný'} (${customDrink.volume}ml, ${customDrink.abv}%)`,
       volume: customDrink.volume / 1000,
       abv: customDrink.abv,
     };
 
-    const updatedSession = {
-      ...currentSession,
-      beers: [...currentSession.beers, newDrink],
-    };
+    if (customDrinkSessionId) {
+      addDrinkToSession(customDrinkSessionId, drinkData);
+      setCustomDrinkSessionId(null);
+    } else {
+      if (!currentSession) {
+        startNewSession();
+        return;
+      }
 
-    setCurrentSession(updatedSession);
-    setSessions(prev => prev.map(s => s.id === updatedSession.id ? updatedSession : s));
+      const newDrink: BeerEntry = {
+        id: Date.now().toString(),
+        timestamp: Date.now(),
+        ...drinkData
+      };
+
+      const updatedSession = {
+        ...currentSession,
+        beers: [...currentSession.beers, newDrink],
+      };
+
+      setCurrentSession(updatedSession);
+      setSessions(prev => prev.map(s => s.id === updatedSession.id ? updatedSession : s));
+    }
     setShowCustomModal(false);
   };
 
@@ -188,10 +203,135 @@ export default function App() {
     setSessions(prev => prev.map(s => s.id === updatedSession.id ? updatedSession : s));
   };
 
+  const updateSessionTimes = (sessionId: string, newStartTime: number, newEndTime?: number) => {
+    setSessions(prev => {
+      const updatedSessions = prev.map(session => {
+        if (session.id !== sessionId) return session;
+
+        const effectiveEndTime = newEndTime || Date.now();
+        const drinkCount = session.beers.length;
+        
+        const updatedBeers = session.beers.map((beer, index) => {
+          let newTimestamp = newStartTime;
+          if (drinkCount > 1) {
+            const interval = (effectiveEndTime - newStartTime) / (drinkCount - 1);
+            newTimestamp = newStartTime + (index * interval);
+          } else if (drinkCount === 1) {
+            newTimestamp = newStartTime;
+          }
+          return { ...beer, timestamp: newTimestamp };
+        });
+
+        return {
+          ...session,
+          startTime: newStartTime,
+          endTime: newEndTime,
+          beers: updatedBeers
+        };
+      });
+
+      const updatedSession = updatedSessions.find(s => s.id === sessionId);
+      if (currentSession?.id === sessionId && updatedSession) {
+        if (newEndTime) {
+          setCurrentSession(null);
+        } else {
+          setCurrentSession(updatedSession);
+        }
+      }
+
+      return updatedSessions;
+    });
+  };
+
+  const [confirmConfig, setConfirmConfig] = useState<{ message: string, onConfirm: () => void } | null>(null);
+
   const deleteSession = (id: string) => {
     setSessions(prev => prev.filter(s => s.id !== id));
     if (currentSession?.id === id) setCurrentSession(null);
     if (selectedSessionId === id) setSelectedSessionId(null);
+    setConfirmConfig(null);
+  };
+
+  const getDrinkIcon = (iconName: string, size = 16) => {
+    switch (iconName) {
+      case 'beer': return <Beer size={size} />;
+      case 'wine': return <Wine size={size} />;
+      case 'martini': return <Martini size={size} />;
+      default: return <Beer size={size} />;
+    }
+  };
+
+  const addDrinkToSession = (sessionId: string, drink: Omit<BeerEntry, 'id' | 'timestamp'>) => {
+    setSessions(prev => {
+      const updatedSessions = prev.map(session => {
+        if (session.id !== sessionId) return session;
+        
+        const newDrink: BeerEntry = {
+          ...drink,
+          id: Math.random().toString(36).substr(2, 9),
+          timestamp: session.endTime || Date.now()
+        };
+
+        const updatedSession = {
+          ...session,
+          beers: [...session.beers, newDrink]
+        };
+
+        // Redistribute drinks after adding a new one to maintain equal spacing
+        const effectiveEndTime = updatedSession.endTime || Date.now();
+        const drinkCount = updatedSession.beers.length;
+        const redistributedBeers = updatedSession.beers.map((b, index) => {
+          let newTimestamp = updatedSession.startTime;
+          if (drinkCount > 1) {
+            const interval = (effectiveEndTime - updatedSession.startTime) / (drinkCount - 1);
+            newTimestamp = updatedSession.startTime + (index * interval);
+          }
+          return { ...b, timestamp: newTimestamp };
+        });
+
+        return { ...updatedSession, beers: redistributedBeers };
+      });
+
+      const updatedSession = updatedSessions.find(s => s.id === sessionId);
+      if (currentSession?.id === sessionId && updatedSession) {
+        setCurrentSession(updatedSession);
+      }
+
+      return updatedSessions;
+    });
+  };
+
+  const removeDrinkFromSession = (sessionId: string, drinkId: string) => {
+    setSessions(prev => {
+      const updatedSessions = prev.map(session => {
+        if (session.id !== sessionId) return session;
+        
+        const updatedBeers = session.beers.filter(b => b.id !== drinkId);
+        
+        // Redistribute remaining drinks
+        const effectiveEndTime = session.endTime || Date.now();
+        const drinkCount = updatedBeers.length;
+        const redistributedBeers = updatedBeers.map((b, index) => {
+          let newTimestamp = session.startTime;
+          if (drinkCount > 1) {
+            const interval = (effectiveEndTime - session.startTime) / (drinkCount - 1);
+            newTimestamp = session.startTime + (index * interval);
+          } else if (drinkCount === 1) {
+            newTimestamp = session.startTime;
+          }
+          return { ...b, timestamp: newTimestamp };
+        });
+
+        return { ...session, beers: redistributedBeers };
+      });
+
+      const updatedSession = updatedSessions.find(s => s.id === sessionId);
+      if (currentSession?.id === sessionId && updatedSession) {
+        setCurrentSession(updatedSession);
+      }
+
+      return updatedSessions;
+    });
   };
 
   const currentBAC = useMemo(() => 
@@ -219,11 +359,21 @@ export default function App() {
 
   const globalStats = useMemo(() => {
     if (sessions.length === 0) return null;
-    const totalBeers = sessions.reduce((acc, s) => acc + s.beers.length, 0);
+    let totalBeers = 0;
+    let totalAlcoholGrams = 0;
+    
+    sessions.forEach(s => {
+      totalBeers += s.beers.length;
+      s.beers.forEach(b => {
+        totalAlcoholGrams += (b.volume * 1000 * (b.abv / 100) * 0.789);
+      });
+    });
+
     return {
       avgBeers: (totalBeers / sessions.length).toFixed(1),
       totalSessions: sessions.length,
       totalBeers,
+      totalAlcoholGrams: totalAlcoholGrams.toFixed(1),
     };
   }, [sessions]);
 
@@ -271,10 +421,13 @@ export default function App() {
           <h1 className="text-xl font-bold tracking-tight">AlcoTracker</h1>
         </div>
         <div className="flex gap-2">
-          <button onClick={() => setShowProfile(true)} className="p-2 bg-zinc-900/50 border border-zinc-800 rounded-xl hover:bg-zinc-800 transition-colors">
+          <button onClick={() => setShowStats(true)} className="p-2 bg-zinc-900/50 border border-zinc-800 rounded-xl hover:bg-zinc-800 transition-colors" title="Štatistiky">
+            <BarChart3 size={20} />
+          </button>
+          <button onClick={() => setShowProfile(true)} className="p-2 bg-zinc-900/50 border border-zinc-800 rounded-xl hover:bg-zinc-800 transition-colors" title="Profil">
             <User size={20} />
           </button>
-          <button onClick={() => setShowHistory(true)} className="p-2 bg-zinc-900/50 border border-zinc-800 rounded-xl hover:bg-zinc-800 transition-colors">
+          <button onClick={() => setShowHistory(true)} className="p-2 bg-zinc-900/50 border border-zinc-800 rounded-xl hover:bg-zinc-800 transition-colors" title="História">
             <History size={20} />
           </button>
         </div>
@@ -288,9 +441,23 @@ export default function App() {
               <div className="mb-8 p-8 bg-zinc-900/30 border border-zinc-800 rounded-3xl backdrop-blur-sm">
                 <GlassWater className="mx-auto mb-4 text-amber-500" size={48} />
                 <h2 className="text-3xl font-bold mb-6">Nová jazda</h2>
-                <button onClick={startNewSession} className="w-full py-4 bg-amber-500 hover:bg-amber-600 text-zinc-950 font-bold rounded-2xl shadow-xl shadow-amber-500/20 transition-all active:scale-95 flex items-center justify-center gap-2">
+                
+                <div className="mb-6 w-full text-left">
+                  <label className="block text-zinc-500 text-[10px] uppercase tracking-widest mb-2 px-1">Kedy si začal piť?</label>
+                  <input 
+                    type="datetime-local" 
+                    value={pendingStartTime}
+                    onChange={(e) => setPendingStartTime(e.target.value)}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-2xl p-4 text-zinc-100 focus:outline-none focus:border-amber-500 transition-colors text-sm"
+                  />
+                </div>
+
+                <button 
+                  onClick={() => startNewSession(new Date(pendingStartTime).getTime())} 
+                  className="w-full py-4 bg-amber-500 hover:bg-amber-600 text-zinc-950 font-bold rounded-2xl shadow-xl shadow-amber-500/20 transition-all active:scale-95 flex items-center justify-center gap-2"
+                >
                   <Plus size={24} />
-                  Začať piť
+                  Začať jazdu
                 </button>
               </div>
             </motion.div>
@@ -332,7 +499,7 @@ export default function App() {
                     {drink.icon === 'martini' && <Martini size={18} />}
                     <div className="flex flex-col">
                       <span className="text-xs font-bold leading-tight">{drink.name}</span>
-                      <span className="text-[10px] opacity-70">{drink.volume}L • {drink.abv}%</span>
+                      <span className="text-[10px] opacity-70">{drink.volume * 1000}ml • {drink.abv}%</span>
                     </div>
                   </button>
                 ))}
@@ -366,13 +533,75 @@ export default function App() {
           <button onClick={endSession} className="py-3 px-4 bg-zinc-900 border border-zinc-800 rounded-xl text-zinc-400 font-medium hover:text-zinc-100 transition-colors flex items-center justify-center gap-2">
             <RotateCcw size={18} /> Koniec
           </button>
-          <button onClick={() => { if (confirm('Zmazať jazdu?')) deleteSession(currentSession.id); }} className="py-3 px-4 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 font-medium hover:bg-red-500/20 transition-colors flex items-center justify-center gap-2">
+          <button onClick={() => setConfirmConfig({ message: 'Zmazať jazdu?', onConfirm: () => deleteSession(currentSession.id) })} className="py-3 px-4 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 font-medium hover:bg-red-500/20 transition-colors flex items-center justify-center gap-2">
             <Trash2 size={18} /> Zmazať
           </button>
         </footer>
       )}
 
-      {/* Profile Modal */}
+      {/* Statistics Modal */}
+      <AnimatePresence>
+        {showStats && (
+          <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="fixed inset-0 bg-zinc-950 z-50 flex flex-col">
+            <div className="p-6 flex justify-between items-center border-b border-zinc-800">
+              <h2 className="text-2xl font-bold">Celkové štatistiky</h2>
+              <button onClick={() => setShowStats(false)} className="p-2 bg-zinc-900 rounded-full"><X size={24} /></button>
+            </div>
+            <div className="p-6 space-y-6 overflow-y-auto">
+              {!globalStats ? (
+                <div className="text-center py-20 text-zinc-500">
+                  <BarChart3 className="mx-auto mb-4 opacity-20" size={64} />
+                  <p>Zatiaľ nemáš žiadne dáta na zobrazenie štatistík.</p>
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 gap-4">
+                    <div className="p-6 bg-zinc-900 border border-zinc-800 rounded-3xl flex flex-col items-center text-center">
+                      <div className="w-12 h-12 bg-amber-500/10 rounded-2xl flex items-center justify-center text-amber-500 mb-4">
+                        <Trophy size={24} />
+                      </div>
+                      <div className="text-zinc-500 text-xs uppercase tracking-widest mb-1">Celkový alkohol</div>
+                      <div className="text-4xl font-black text-amber-500">{globalStats.totalAlcoholGrams} g</div>
+                      <div className="text-zinc-500 text-sm mt-1">čistého etanolu</div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="p-5 bg-zinc-900 border border-zinc-800 rounded-3xl">
+                      <div className="text-zinc-500 text-[10px] uppercase tracking-widest mb-2">Počet jázd</div>
+                      <div className="text-2xl font-bold">{globalStats.totalSessions}</div>
+                    </div>
+                    <div className="p-5 bg-zinc-900 border border-zinc-800 rounded-3xl">
+                      <div className="text-zinc-500 text-[10px] uppercase tracking-widest mb-2">Všetky drinky</div>
+                      <div className="text-2xl font-bold">{globalStats.totalBeers}</div>
+                    </div>
+                    <div className="p-5 bg-zinc-900 border border-zinc-800 rounded-3xl">
+                      <div className="text-zinc-500 text-[10px] uppercase tracking-widest mb-2">Priemer / jazda</div>
+                      <div className="text-2xl font-bold">{globalStats.avgBeers}</div>
+                    </div>
+                    <div className="p-5 bg-zinc-900 border border-zinc-800 rounded-3xl">
+                      <div className="text-zinc-500 text-[10px] uppercase tracking-widest mb-2">Stav</div>
+                      <div className="text-sm font-bold text-emerald-500 flex items-center gap-1">
+                        <TrendingUp size={14} /> Aktívny
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-6 bg-amber-500/5 border border-amber-500/10 rounded-3xl">
+                    <h4 className="text-sm font-bold text-amber-500 mb-2 flex items-center gap-2">
+                      <Info size={16} /> Vedel si?
+                    </h4>
+                    <p className="text-xs text-zinc-400 leading-relaxed">
+                      Svetová zdravotnícka organizácia (WHO) odporúča pre mužov neprekračovať 2 standardné drinky denne a pre ženy 1 drink, s aspoň dvoma dňami bez alkoholu týždenne.
+                    </p>
+                  </div>
+                </>
+              )}
+              <button onClick={() => setShowStats(false)} className="w-full py-4 bg-zinc-100 text-zinc-950 font-bold rounded-2xl mt-4">Zavrieť</button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       <AnimatePresence>
         {showProfile && (
           <motion.div initial={{ opacity: 0, y: '100%' }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: '100%' }} className="fixed inset-0 bg-zinc-950 z-50 flex flex-col">
@@ -409,10 +638,10 @@ export default function App() {
       {/* Custom Drink Modal */}
       <AnimatePresence>
         {showCustomModal && (
-          <motion.div initial={{ opacity: 0, y: '100%' }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: '100%' }} className="fixed inset-0 bg-zinc-950 z-50 flex flex-col">
+          <motion.div initial={{ opacity: 0, y: '100%' }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: '100%' }} className="fixed inset-0 bg-zinc-950 z-[60] flex flex-col">
             <div className="p-6 flex justify-between items-center border-b border-zinc-800">
               <h2 className="text-2xl font-bold">Vlastný drink</h2>
-              <button onClick={() => setShowCustomModal(false)} className="p-2 bg-zinc-900 rounded-full"><X size={24} /></button>
+              <button onClick={() => { setShowCustomModal(false); setCustomDrinkSessionId(null); }} className="p-2 bg-zinc-900 rounded-full"><X size={24} /></button>
             </div>
             <div className="p-6 space-y-8 overflow-y-auto">
               {/* Category Presets */}
@@ -489,7 +718,7 @@ export default function App() {
                   onClick={addCustomDrink}
                   className="w-full py-5 bg-amber-500 text-zinc-950 font-black text-xl rounded-2xl shadow-xl shadow-amber-500/20 active:scale-95 transition-all"
                 >
-                  PRIDAŤ VLASTNÝ DRINK
+                  {customDrinkSessionId ? 'PRIDAŤ DO HISTÓRIE' : 'PRIDAŤ DRINK'}
                 </button>
               </div>
             </div>
@@ -529,6 +758,43 @@ export default function App() {
                 <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-6 pb-12">
                   <button onClick={() => setSelectedSessionId(null)} className="text-amber-500 font-bold flex items-center gap-1 text-sm"><X size={16} /> Späť</button>
                   <h3 className="text-3xl font-black">Detail jazdy</h3>
+                  
+                  <div className="space-y-4 p-4 bg-zinc-900 border border-zinc-800 rounded-2xl">
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest flex items-center gap-1">
+                        <Calendar size={12} /> Začiatok
+                      </label>
+                      <input 
+                        type="datetime-local" 
+                        value={new Date(selectedSession.startTime).toISOString().slice(0, 16)}
+                        onChange={(e) => updateSessionTimes(selectedSession.id, new Date(e.target.value).getTime(), selectedSession.endTime)}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-xs font-bold focus:border-amber-500 outline-none min-w-0"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest flex items-center gap-1">
+                        <Clock size={12} /> Koniec
+                      </label>
+                      <div className="flex gap-2">
+                        <input 
+                          type="datetime-local" 
+                          value={selectedSession.endTime ? new Date(selectedSession.endTime).toISOString().slice(0, 16) : ''}
+                          onChange={(e) => updateSessionTimes(selectedSession.id, selectedSession.startTime, e.target.value ? new Date(e.target.value).getTime() : undefined)}
+                          className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-xs font-bold focus:border-amber-500 outline-none min-w-0"
+                          placeholder="Prebieha..."
+                        />
+                        {!selectedSession.endTime && (
+                          <button 
+                            onClick={() => updateSessionTimes(selectedSession.id, selectedSession.startTime, Date.now())}
+                            className="px-4 bg-amber-500 text-zinc-950 font-bold rounded-xl text-xs"
+                          >
+                            Ukončiť
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
                   <div className="grid grid-cols-2 gap-3">
                     <div className="p-4 bg-zinc-900 border border-zinc-800 rounded-2xl">
                       <div className="text-zinc-500 text-[10px] uppercase mb-1">Max Promile</div>
@@ -551,24 +817,106 @@ export default function App() {
                     </div>
                   </div>
                   <section>
-                    <h4 className="text-xs font-bold text-zinc-500 uppercase tracking-widest mb-4">Zoznam drinkov</h4>
+                    <div className="flex flex-col gap-4 mb-4">
+                      <h4 className="text-xs font-bold text-zinc-500 uppercase tracking-widest">Zoznam drinkov</h4>
+                      <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+                        {DRINK_TYPES.map((drink) => (
+                          <button 
+                            key={drink.id}
+                            onClick={() => addDrinkToSession(selectedSession.id, { type: drink.name, volume: drink.volume, abv: drink.abv })}
+                            className="flex-shrink-0 p-2 bg-zinc-900 border border-zinc-800 rounded-xl text-amber-500 hover:bg-zinc-800 transition-colors flex flex-col items-center gap-1 min-w-[85px] relative group/btn"
+                            title={`Pridať ${drink.name}`}
+                          >
+                            <div className="absolute top-1 right-1 opacity-0 group-hover/btn:opacity-100 transition-opacity">
+                              <Plus size={10} />
+                            </div>
+                            {getDrinkIcon(drink.icon, 18)}
+                            <div className="flex flex-col items-center w-full overflow-hidden">
+                              <span className="text-[8px] font-bold uppercase truncate w-full text-center leading-tight">{drink.name}</span>
+                              <span className="text-[7px] text-zinc-500 font-medium truncate w-full text-center">{drink.volume * 1000}ml • {drink.abv}%</span>
+                            </div>
+                          </button>
+                        ))}
+                        <button 
+                          onClick={() => {
+                            setCustomDrinkSessionId(selectedSession.id);
+                            setShowCustomModal(true);
+                          }}
+                          className="flex-shrink-0 p-2 bg-zinc-900 border border-dashed border-zinc-700 rounded-xl text-zinc-500 hover:border-amber-500 hover:text-amber-500 transition-colors flex flex-col items-center gap-1 min-w-[85px]"
+                          title="Pridať vlastný drink"
+                        >
+                          <Plus size={18} />
+                          <div className="flex flex-col items-center w-full overflow-hidden">
+                            <span className="text-[8px] font-bold uppercase truncate w-full text-center leading-tight">Vlastný</span>
+                            <span className="text-[7px] text-zinc-500 font-medium truncate w-full text-center">Iný objem / %</span>
+                          </div>
+                        </button>
+                      </div>
+                    </div>
                     <div className="space-y-2">
                       {selectedSession.beers.map((beer, idx) => (
-                        <div key={beer.id} className="p-3 bg-zinc-900/50 border border-zinc-800 rounded-xl flex justify-between items-center">
+                        <div key={beer.id} className="p-3 bg-zinc-900/50 border border-zinc-800 rounded-xl flex justify-between items-center group">
                           <div className="flex items-center gap-3">
                             <span className="text-xs text-zinc-500 font-bold">{idx + 1}.</span>
-                            <span className="font-bold">{beer.type}</span>
+                            <div className="flex flex-col">
+                              <span className="font-bold text-sm">{beer.type}</span>
+                              <span className="text-[10px] text-zinc-500">{beer.volume * 1000}ml • {beer.abv}%</span>
+                            </div>
                           </div>
-                          <span className="text-xs text-zinc-500">{new Date(beer.timestamp).toLocaleTimeString('sk-SK', { hour: '2-digit', minute: '2-digit' })}</span>
+                          <div className="flex items-center gap-3">
+                            <span className="text-[10px] text-zinc-500">{new Date(beer.timestamp).toLocaleTimeString('sk-SK', { hour: '2-digit', minute: '2-digit' })}</span>
+                            <button 
+                              onClick={() => removeDrinkFromSession(selectedSession.id, beer.id)}
+                              className="p-1.5 text-zinc-600 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
                         </div>
                       ))}
+                      {selectedSession.beers.length === 0 && (
+                        <div className="text-center py-6 border border-dashed border-zinc-800 rounded-xl text-zinc-600 text-xs">
+                          Žiadne drinky v tejto jazde.
+                        </div>
+                      )}
                     </div>
                   </section>
-                  <button onClick={() => { if (confirm('Zmazať záznam?')) deleteSession(selectedSession.id); }} className="w-full py-4 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-400 font-bold">Zmazať záznam</button>
+                  
+                  <div className="pt-8">
+                    <button 
+                      onClick={() => setConfirmConfig({
+                        message: 'Naozaj chcete vymazať celú túto jazdu?',
+                        onConfirm: () => deleteSession(selectedSession.id)
+                      })}
+                      className="w-full py-4 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-400 font-bold flex items-center justify-center gap-2 hover:bg-red-500/20 transition-colors"
+                    >
+                      <Trash2 size={18} /> Vymazať celú jazdu
+                    </button>
+                  </div>
                 </motion.div>
               )}
             </div>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Confirmation Modal */}
+      <AnimatePresence>
+        {confirmConfig && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-zinc-950/80 backdrop-blur-sm" onClick={() => setConfirmConfig(null)} />
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-xs bg-zinc-900 border border-zinc-800 rounded-3xl p-6 shadow-2xl">
+              <div className="w-12 h-12 bg-red-500/10 rounded-2xl flex items-center justify-center text-red-500 mb-4">
+                <Trash2 size={24} />
+              </div>
+              <h3 className="text-xl font-bold mb-2">Potvrdenie</h3>
+              <p className="text-zinc-400 text-sm mb-6">{confirmConfig.message}</p>
+              <div className="grid grid-cols-2 gap-3">
+                <button onClick={() => setConfirmConfig(null)} className="py-3 bg-zinc-800 text-zinc-100 font-bold rounded-xl hover:bg-zinc-700 transition-colors">Zrušiť</button>
+                <button onClick={confirmConfig.onConfirm} className="py-3 bg-red-500 text-white font-bold rounded-xl hover:bg-red-600 transition-colors">Zmazať</button>
+              </div>
+            </motion.div>
+          </div>
         )}
       </AnimatePresence>
     </div>
