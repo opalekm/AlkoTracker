@@ -264,12 +264,23 @@ export default function App() {
   };
 
   const getDrinkIcon = (iconName: string, size = 16) => {
-    switch (iconName) {
-      case 'beer': return <Beer size={size} />;
-      case 'wine': return <Wine size={size} />;
-      case 'martini': return <Martini size={size} />;
-      default: return <Beer size={size} />;
-    }
+    const icon = (() => {
+      switch (iconName) {
+        case 'beer': return <Beer size={size} />;
+        case 'wine': return <Wine size={size} />;
+        case 'martini': return <Martini size={size} />;
+        default: return <Beer size={size} />;
+      }
+    })();
+    
+    return (
+      <motion.div 
+        whileTap={{ scale: 0.7, rotate: -15 }} 
+        transition={{ type: 'spring', stiffness: 500, damping: 15 }}
+      >
+        {icon}
+      </motion.div>
+    );
   };
 
   const addDrinkToSession = (sessionId: string, drink: Omit<BeerEntry, 'id' | 'timestamp'>) => {
@@ -574,8 +585,9 @@ export default function App() {
                   {/* Drink Type Grid */}
                   <div className="grid grid-cols-2 gap-2 w-full mb-8 max-h-[200px] overflow-y-auto p-1">
                     {DRINK_TYPES.map(drink => (
-                      <button
+                      <motion.button
                         key={drink.id}
+                        whileTap={{ scale: 0.95 }}
                         onClick={() => setSelectedDrinkId(drink.id)}
                         className={`p-3 rounded-xl border transition-all text-left flex items-center gap-3 ${
                           selectedDrinkId === drink.id 
@@ -583,14 +595,19 @@ export default function App() {
                             : 'bg-zinc-900/50 border-zinc-800 text-zinc-400 hover:border-zinc-700'
                         }`}
                       >
-                        {drink.icon === 'beer' && <Beer size={18} />}
-                        {drink.icon === 'wine' && <Wine size={18} />}
-                        {drink.icon === 'martini' && <Martini size={18} />}
+                        <motion.div
+                          animate={selectedDrinkId === drink.id ? { scale: [1, 1.2, 1], rotate: [0, 10, -10, 0] } : {}}
+                          transition={{ duration: 0.4 }}
+                        >
+                          {drink.icon === 'beer' && <Beer size={18} />}
+                          {drink.icon === 'wine' && <Wine size={18} />}
+                          {drink.icon === 'martini' && <Martini size={18} />}
+                        </motion.div>
                         <div className="flex flex-col">
                           <span className="text-xs font-bold leading-tight">{drink.name}</span>
                           <span className="text-[10px] opacity-70">{drink.volume * 1000}ml • {drink.abv}%</span>
                         </div>
-                      </button>
+                      </motion.button>
                     ))}
                     <button
                       onClick={() => setShowCustomModal(true)}
@@ -604,13 +621,19 @@ export default function App() {
                     </button>
                   </div>
 
-                  <button
+                  <motion.button
+                    whileTap={{ scale: 0.92 }}
                     onClick={addDrink}
-                    className="w-full py-6 bg-amber-500 rounded-2xl flex flex-col items-center justify-center shadow-2xl shadow-amber-500/40 active:scale-95 transition-all border-b-4 border-amber-600"
+                    className="w-full py-6 bg-amber-500 rounded-2xl flex flex-col items-center justify-center shadow-2xl shadow-amber-500/40 transition-all border-b-4 border-amber-600"
                   >
-                    <Plus size={32} className="text-zinc-950" />
+                    <motion.div
+                      whileTap={{ rotate: 180, scale: 1.5 }}
+                      transition={{ type: 'spring', stiffness: 300 }}
+                    >
+                      <Plus size={32} className="text-zinc-950" />
+                    </motion.div>
                     <span className="text-zinc-950 font-black text-xl">PRIDAŤ DRINK</span>
-                  </button>
+                  </motion.button>
                 </>
               ) : (
                 <div className="w-full mt-4">
@@ -936,7 +959,7 @@ export default function App() {
                       <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest flex items-center gap-1">
                         <Clock size={12} /> Koniec
                       </label>
-                      <div className="flex gap-2">
+                      <div className="flex gap-2 w-full">
                         <input 
                           type="datetime-local" 
                           value={selectedSession.endTime ? new Date(selectedSession.endTime).toISOString().slice(0, 16) : ''}
